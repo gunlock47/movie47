@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
 DATA_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/kobis_movies.csv"
@@ -68,24 +69,92 @@ if len(selected_labels) < 2:
 selected_cols = [feature_options[label] for label in selected_labels]
 
 # ---------------------------------------------------------------
-# 표준화 후 k-평균으로 3개 묶음으로 분리 (난수 고정)
+# 표준화
 # ---------------------------------------------------------------
 X = data[selected_cols]
 X_scaled = StandardScaler().fit_transform(X)
-kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-data["cluster"] = kmeans.fit_predict(X_scaled)
 
-# 누적 관객 평균이 큰 묶음부터 ㉮, ㉯, ㉰
+# ---------------------------------------------------------------
+# 묶음 수 선택
+# ---------------------------------------------------------------
+st.subheader("묶음 수 선택")
+n_clusters = st.slider("묶음 수를 선택하세요", min_value=2, max_value=7, value=3)
+
+# 전체 기호 목록 (최대 7개까지 사용)
+ALL_SYMBOLS = ["㉮", "㉯", "㉰", "㉱", "㉲", "㉳", "㉴"]
+
+# ---------------------------------------------------------------
+# 묶음 수 1~7에 대해 k-평균을 미리 계산 (난수 고정, 팔꿈치·현재 선택에 재사용)
+# ---------------------------------------------------------------
+inertias = {}
+fitted_models = {}
+for k in range(1, 8):
+    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    km.fit(X_scaled)
+    inertias[k] = km.inertia_
+    fitted_models[k] = km
+
+# ---------------------------------------------------------------
+# 팔꿈치(elbow) 그래프: 묶음 수별 관성(inertia) 값
+# ---------------------------------------------------------------
+st.subheader("묶음 수에 따른 관성(inertia) 변화")
+elbow_df = pd.DataFrame({
+    "묶음 수": list(range(1, 8)),
+    "관성": [inertias[k] for k in range(1, 8)],
+})
+
+fig_elbow = px.line(elbow_df, x="묶음 수", y="관성", markers=True)
+fig_elbow.add_vline(
+    x=n_clusters,
+    line_dash="dash",
+    line_color="red",
+    annotation_text=f"현재 선택: {n_clusters}",
+    annotation_position="top",
+)
+fig_elbow.update_xaxes(dtick=1)
+st.plotly_chart(fig_elbow, use_container_width=True)
+
+# ---------------------------------------------------------------
+# 관성 값과 이전 값 대비 감소량 표
+# ---------------------------------------------------------------
+decrease_values = [None]
+for k in range(2, 8):
+    decrease_values.append(inertias[k - 1] - inertias[k])
+
+elbow_table = pd.DataFrame({
+    "묶음 수": list(range(1, 8)),
+    "관성 값": [round(inertias[k], 2) for k in range(1, 8)],
+    "이전 값 대비 감소량": [round(v, 2) if v is not None else "" for v in decrease_values],
+})
+st.dataframe(elbow_table, use_container_width=True, hide_index=True)
+
+# ---------------------------------------------------------------
+# 현재 선택한 묶음 수의 실루엣 점수
+# ---------------------------------------------------------------
+current_labels_for_silhouette = fitted_models[n_clusters].labels_
+sil_score = silhouette_score(X_scaled, current_labels_for_silhouette)
+st.write(
+    f"현재 선택한 묶음 수 {n_clusters}의 실루엣 점수는 {sil_score:.3f}입니다. "
+    "(-1~1 사이 값이며, 1에 가까울수록 묶음이 뚜렷합니다.)"
+)
+
+st.divider()
+
+# ---------------------------------------------------------------
+# 선택한 묶음 수로 실제 묶음 배정
+# ---------------------------------------------------------------
+data["cluster"] = fitted_models[n_clusters].labels_
+
+# 누적 관객 평균이 큰 묶음부터 순서대로 기호 부여
 cluster_order = (
     data.groupby("cluster")["total_audi"].mean().sort_values(ascending=False).index.tolist()
 )
-symbols = ["㉮", "㉯", "㉰"]
+symbols = ALL_SYMBOLS[:n_clusters]
 symbol_map = {cluster_id: sym for cluster_id, sym in zip(cluster_order, symbols)}
 data["묶음"] = data["cluster"].map(symbol_map)
 
-color_map = {"㉮": "#EF553B", "㉯": "#636EFA", "㉰": "#00CC96"}
-
-st.divider()
+palette = px.colors.qualitative.Dark24
+color_map = {sym: palette[i % len(palette)] for i, sym in enumerate(symbols)}
 
 # ---------------------------------------------------------------
 # 2차원 산점도
@@ -167,7 +236,7 @@ st.dataframe(summary, use_container_width=True)
 # 묶음별 누적 관객 상위 5편
 # ---------------------------------------------------------------
 st.subheader("묶음별 누적 관객 상위 5편")
-cols = st.columns(3)
+cols = st.columns(len(symbols))
 for sym, col in zip(symbols, cols):
     with col:
         st.markdown(f"**{sym} 묶음**")
